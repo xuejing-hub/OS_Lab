@@ -454,84 +454,185 @@ buddy = base + ((block - base) ^ (1 << order))
 
 ## 二、实验设计与实现
 
-### 2.1 模块结构
+本节给出 Buddy System 在 uCore 内核中源码级实现的关键设计与伪代码说明，便于将设计思路映射到 `kern/mm/buddy_system_pmm.c` 的具体实现。
 
-Buddy System 作为物理内存管理器（pmm_manager）的一种实现方式，需要完成以下接口函数：
+### 2.1 模块总体结构
+
+在本实验中，我们在 uCore 的 `kern/mm/` 目录下新增文件 `buddy_system_pmm.c`，并在 `pmm.h` 中声明接口，使其作为物理内存管理器的一种替代实现。该模块通过维护多阶空闲链表来实现内存的分配与回收，是对系统默认的 `default_pmm.c` 的替换与优化。
+
+整体接口规范：
 
 | 函数名 | 功能说明 |
 |---|---|
-| `buddy_system_init()` | 初始化伙伴系统内存结构 |
-| `buddy_system_init_memmap(struct Page *base, size_t n)` | 建立物理页的伙伴分配表 |
-| `buddy_system_alloc_pages(size_t n)` | 分配 n 页内存 |
-| `buddy_system_free_pages(struct Page *base, size_t n)` | 释放从 base 开始的 n 页内存 |
-| `buddy_system_nr_free_pages(void)` | 返回当前空闲页数量 |
-| `buddy_system_check()` | 内置自测函数 |
+| `buddy_system_init()` | 初始化伙伴系统环境 |
+| `buddy_system_init_memmap(struct Page *base, size_t n)` | 初始化页表与伙伴链表 |
+| `buddy_system_alloc_pages(size_t n)` | 分配 n 页连续物理页 |
+| `buddy_system_free_pages(struct Page *base, size_t n)` | 释放物理页并尝试合并 |
+| `buddy_system_nr_free_pages(void)` | 返回当前空闲页数 |
+| `buddy_system_check()` | 自检与调试函数 |
+
+系统核心思想是将物理内存按 2 的幂次划分为多个“阶”（order）的块，每阶维护一条空闲链表。当需要分配某个大小的块时，从合适的阶中取出；若该阶为空，则向上查找更大阶块并不断拆分。释放时则反向操作：查找伙伴块并尝试合并，从而最大化连续空闲块。
 
 ### 2.2 数据结构设计
 
-示例宏与结构体：
+核心宏与结构体：
 
 ```c
-#define MAX_ORDER 14
+#define MAX_BUDDY_ORDER 14
 
 struct free_area {
-	list_entry_t free_list;  // 每阶的空闲链表
-	unsigned int nr_free;    // 空闲块数量
+	list_entry_t free_list;  // 每阶的空闲链表头
+	unsigned int nr_free;    // 当前阶空闲块数量
 };
 
-static struct free_area free_area[MAX_ORDER + 1];
+static struct free_area buddy_array[MAX_BUDDY_ORDER + 1];
 ```
 
-每阶都维护一个空闲链表，用于记录当前可用的块。每个块由一个 `Page` 结构体代表。
+另外维护一个全局状态结构（或全局变量）：
 
-### 2.3 分配算法流程
+- `max_order`：系统能管理的最大阶；
+- `nr_free`：总空闲页数；
 
-1. 根据请求的页数计算最小阶数（find_order）；
-2. 从该阶开始向上查找第一个非空闲阶（order <= MAX_ORDER）；
-3. 若找到更高阶的空闲块，则逐级拆分（split_block），每次拆分将另一半插入下一级的空闲链表；
-4. 返回拆分后满足请求的块。
+该设计使内存分配复杂度从线性扫描降为对数级（O(log n)），释放时能迅速定位伙伴块并合并。
 
-伪代码：
+### 2.3 初始化阶段
+
+初始化填写链表头与计数器：
 
 ```c
-for (order = min_order; order <= MAX_ORDER; order++) {
-	if (!list_empty(&free_area[order].free_list)) {
-		while (order > min_order) {
-			split_block(order);
-			order--;
-		}
-		allocate_block(order);
-		return block;
+static void buddy_system_init(void) {
+	for (int i = 0; i <= MAX_BUDDY_ORDER; i++)
+		list_init(&buddy_array[i].free_list);
+	max_order = MAX_BUDDY_ORDER;
+	nr_free = 0;
+}
+```
+
+在系统启动的内存探测阶段（例如 `pmm_init()` 中），`buddy_system_init_memmap()` 会扫描物理页并将整块最大阶空闲页挂入 `buddy_array[max_order]`：
+
+```c
+base->property = max_order;
+SetPageProperty(base);
+list_add(&buddy_array[max_order].free_list, &base->page_link);
+nr_free = total_pages;
+```
+
+这样系统启动时的空闲链表中只存在一块最大阶内存，后续分配请求将逐步拆分使用。
+
+### 2.4 分配算法设计
+
+（1）计算所需阶数：
+
+首先根据请求页数计算最小满足条件的阶：
+
+```c
+int find_order(size_t pages) {
+	int order = 0;
+	size_t sz = 1;
+	while (sz < pages) { sz <<= 1; order++; }
+	return order;
+}
+```
+
+例如，请求 3 页会被调整为 4 页（2²）。
+
+（2）查找合适空闲块并拆分：
+
+算法从目标阶向上查找第一个非空链表，若找到更高阶块，则执行拆分操作直到降到目标阶：
+
+```c
+for (unsigned int current_order = order; current_order <= max_order; current_order++) {
+	if (!list_empty(&buddy_array[current_order].free_list)) {
+		/* 不断拆分直到 current_order == order */
+		while (current_order > order)
+			buddy_system_split(current_order--);
+
+		/* 从链表取出一个块作为分配结果 */
+		struct Page *allocated = le2page(list_next(&buddy_array[order].free_list), page_link);
+		list_del(&allocated->page_link);
+		buddy_array[order].nr_free -= (1U << order);
+		nr_free -= (1U << order);
+		return allocated;
 	}
 }
 ```
 
-### 2.4 回收算法流程
-
-1. 计算当前块的伙伴地址（get_buddy）；
-2. 判断伙伴块是否空闲且阶数相同；
-3. 如果可合并，则从空闲链表移除伙伴并合并（merge），将合并后的更大块作为当前块继续尝试向上合并；
-4. 若不能合并或达到了最大阶，则将当前块插入对应阶链表。
-
-伪代码：
+拆分函数 `buddy_system_split(n)` 将高阶块对半拆分为两个 n-1 阶块并插回对应链表：
 
 ```c
-while (order < MAX_ORDER) {
-	buddy = get_buddy(base, order);
-	if (!is_free(buddy) || buddy->order != order) break;
-	remove_from_list(buddy);
-	merge_blocks(base, buddy);
-	order++;
-}
-insert_to_free_list(base, order);
+struct Page *page1 = le2page(list_next(&buddy_array[n].free_list), page_link);
+list_del(&page1->page_link);
+struct Page *page2 = page1 + (1UL << (n - 1));
+page1->property = page2->property = n - 1;
+list_add(&buddy_array[n - 1].free_list, &page1->page_link);
+list_add(&buddy_array[n - 1].free_list, &page2->page_link);
+buddy_array[n - 1].nr_free += (1U << (n - 1)) * 2;
 ```
 
-### 2.5 辅助函数
+（3）复杂度分析：
 
-- `get_buddy()`：计算并返回伙伴块指针；
-- `split_block()`：将大块拆成两个小块；
-- `merge_block()`：将两个相邻小块合并为更大块；
-- `find_order(n)`：计算最小满足 n 页的阶数。
+分配过程的核心为“向上查找 + 拆分”，最多拆分 `MAX_BUDDY_ORDER` 次，因此时间复杂度为 O(log N)。
+
+### 2.5 回收算法设计
+
+释放函数 `buddy_system_free_pages()` 执行以下逻辑：
+
+1. 将释放块标记并挂回对应阶链表；
+2. 计算其伙伴块地址 `get_buddy()`；
+3. 若伙伴块空闲且阶相同，则从链表移除并合并为更高阶块；
+4. 循环尝试向上合并，直到达到 `max_order` 或伙伴被占用。
+
+核心伪代码：
+
+```c
+while (block->property < max_order) {
+	struct Page *buddy = get_buddy(block, block->property);
+	if (!PageProperty(buddy)) break; /* 伙伴不空闲或阶数不同 */
+
+	if (block > buddy) swap(block, buddy);
+
+	/* 从链表移除两块并合并 */
+	list_del(&block->page_link);
+	list_del(&buddy->page_link);
+	block->property += 1;
+	list_add(&buddy_array[block->property].free_list, &block->page_link);
+}
+```
+
+`get_buddy()` 的计算基于 XOR 原理，通过翻转第 `order` 位获得伙伴地址，无需遍历链表：
+
+```c
+size_t relative = page2pa(block) - base_pa; /* 以 base 为起点的偏移 */
+size_t buddy_relative = relative ^ ((size_t)PGSIZE << order);
+return (struct Page *) (base_pa + buddy_relative);
+```
+
+该方法在常数时间内定位伙伴块，显著提升释放与合并效率。
+
+### 2.6 调试与辅助函数
+
+为便于验证实现正确性，实现了若干调试函数：
+
+- `show_buddy_array(left, right)`：打印 `left` 到 `right` 阶的链表快照；
+- `check_alloc_page()`：完整性检查函数，遍历页表并验证 `nr_free` 与链表一致性；
+- 若干包装函数 `page2pa()`、`SetPageProperty()`、`PageProperty()` 等用于页属性管理。
+
+示例 `show_buddy_array()` 输出实现伪码：
+
+```c
+for (int i = left; i <= right; i++) {
+	list_entry_t *head = &buddy_array[i].free_list;
+	if (list_empty(head)) continue;
+	cprintf("阶数 %d 的空闲链表:\n", i);
+	for (le = list_next(head); le != head; le = list_next(le)) {
+		struct Page *p = le2page(le, page_link);
+		cprintf("  块地址: %p, 大小: %lu 页\n", p, 1UL << p->property);
+	}
+}
+```
+
+该函数在 `buddy_system_check()` 自测中被频繁调用，以直观展示各阶空闲块的分布情况，辅助调试分配与合并过程。
+
 
 ## 三、测试设计
 
@@ -1018,5 +1119,6 @@ void slub_free(void *ptr) {
 * 最终一致性检查 → 所有空闲页统计与 `nr_free` 一致
 
 ---
+
 
 
