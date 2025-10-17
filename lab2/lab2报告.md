@@ -410,7 +410,7 @@ best_fit_alloc_pages(size_t n) {
 
 
 
-## Buddy System（伙伴系统）分配算法
+## 扩展练习Challenge：buddy system（伙伴系统）分配算法（需要编程）
 
 ### 一、实验原理与算法分析
 
@@ -831,7 +831,7 @@ satp physical address: 0x0000000080205000
 Buddy System 内存分配器在本实验中的实现功能完备、运行稳定，能够正确管理不同大小的内存块，实现了分配与回收的高效平衡。所有设计测试均通过，验证了算法实现的正确性与鲁棒性。
 
 ---
-## 扩展练习Challenge：任意大小的内存单元slub分配算法
+## 扩展练习Challenge：任意大小的内存单元slub分配算法（需要编程）
 
 ### 算法介绍
 
@@ -1119,6 +1119,7 @@ void slub_free(void *ptr) {
 * 最终一致性检查 → 所有空闲页统计与 `nr_free` 一致
 
 ---
+
 
 
 
