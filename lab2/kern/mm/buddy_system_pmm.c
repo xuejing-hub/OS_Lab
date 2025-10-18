@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <buddy_system_pmm.h>
+#include <memlayout.h>
 
 buddy_system_t buddy_system;
 #define buddy_array (buddy_system.free_array)
@@ -40,6 +41,9 @@ static void buddy_system_init_memmap(struct Page *base, size_t n) {
 
     max_order = order;
     nr_free = p_number;
+
+    /* 记录管理区基址，供 get_buddy 使用 */
+    buddy_system.base = base;
 
     for (struct Page* p = base; p < base + p_number; p++) {
         assert(PageReserved(p));
@@ -106,11 +110,16 @@ static struct Page* buddy_system_alloc_pages(size_t requested_pages) {
 
 struct Page *get_buddy(struct Page *block_addr, unsigned int order) {
     size_t block_size = 1UL << order;
-    size_t relative_addr = (size_t)block_addr - 0xffffffffc020f318;
-    size_t size_in_bytes = block_size * 0x28;
-    size_t buddy_relative_addr = relative_addr ^ size_in_bytes;
-    return (struct Page *)(buddy_relative_addr + 0xffffffffc020f318);
+    /* 计算 block_addr 相对于 buddy_system.base 的页偏移（以 Page 单位） */
+    size_t offset = (size_t)(block_addr - buddy_system.base);
+    size_t buddy_offset = offset ^ block_size;
+    /* 边界检查，防止越界访问 */
+    if (buddy_offset >= npage) {
+        panic("get_buddy: buddy offset out of range\n");
+    }
+    return buddy_system.base + buddy_offset;
 }
+
 
 //页的释放
 static void buddy_system_free_pages(struct Page* base, size_t n) {
