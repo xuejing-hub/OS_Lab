@@ -602,9 +602,10 @@ while (block->property < max_order) {
 `get_buddy()` 的计算基于 XOR 原理，通过翻转第 `order` 位获得伙伴地址，无需遍历链表：
 
 ```c
-size_t relative = page2pa(block) - base_pa; /* 以 base 为起点的偏移 */
-size_t buddy_relative = relative ^ ((size_t)PGSIZE << order);
-return (struct Page *) (base_pa + buddy_relative);
+    size_t block_size = 1UL << order;
+    /* 计算 block_addr 相对于 buddy_system.base 的页偏移（以 Page 单位） */
+    size_t offset = (size_t)(block_addr - buddy_system.base);
+    size_t buddy_offset = offset ^ block_size;
 ```
 
 该方法在常数时间内定位伙伴块，显著提升释放与合并效率。
@@ -1183,6 +1184,7 @@ CPU 访问虚拟地址时，会通过页号逐级索引页表，最终定位到�
 - SLUB 分配器：针对小对象分配，将页划分为更小对象单元，适用于频繁的小对象分配场景。
 
 ---
+
 
 
 
