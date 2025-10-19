@@ -17,13 +17,13 @@ static void buddy_system_init(void) {
     for (int i = 0; i <= MAX_BUDDY_ORDER; i++) {
         list_init(&buddy_array[i]);
     }
-    max_order = 0;
-    nr_free = 0;
+    max_order = 0;//当前系统中最大的连续空闲块阶数为 0（即：初始化时没有记录任何可用块）
+    nr_free = 0;//当前系统空闲页数量为 0
 }
 
 //初始化链表
 static void buddy_system_init_memmap(struct Page *base, size_t n) {
-    assert(n > 0);
+    assert(n > 0);//确保传入的页数 n 不为 0。
 
     // 直接计算最接近 2 的幂，不大于 n
     size_t p_number = 1;
@@ -42,17 +42,17 @@ static void buddy_system_init_memmap(struct Page *base, size_t n) {
     max_order = order;
     nr_free = p_number;
 
-    /* 记录管理区基址，供 get_buddy 使用 */
+    // 记录管理区基址，供 get_buddy 使用
     buddy_system.base = base;
 
     for (struct Page* p = base; p < base + p_number; p++) {
-        assert(PageReserved(p));
+        assert(PageReserved(p));//确保该页最初是保留态（内核初始化时所有页都被标记为保留）。
         p->flags = 0;
-        p->property = -1;
+        p->property = -1;//初始化属性为 -1，说明此页不是块头页。
         set_page_ref(p, 0);
     }
 
-    base->property = max_order;
+    base->property = max_order;//表示从 base 开始的一段 2^max_order 页是一个完整空闲块
     SetPageProperty(base);
     list_add(&buddy_array[max_order], &base->page_link);
 }
@@ -63,21 +63,21 @@ static void buddy_system_split(size_t n) {
     assert(!list_empty(&buddy_array[n]));
 
     list_entry_t* le = list_next(&buddy_array[n]);
-    struct Page* page1 = le2page(le, page_link);
+    struct Page* page1 = le2page(le, page_link);//通过宏将链表节点转换为 Page 结构体指针。
 
     size_t half_size = 1UL << (n - 1);
     struct Page* page2 = page1 + half_size;
 
     page1->property = page2->property = n - 1;
     SetPageProperty(page1);
-    SetPageProperty(page2);
+    SetPageProperty(page2);//调用 SetPageProperty 设置标志位，表明它们都是块头页。
 
     list_del(le);
     list_add(&buddy_array[n - 1], &page1->page_link);
     list_add(&page1->page_link, &page2->page_link);
 }
 
-//页的分配
+//页的分配：分配 requested_pages 页内存，返回分配得到的块的首地址。
 static struct Page* buddy_system_alloc_pages(size_t requested_pages) {
     assert(requested_pages > 0);
     if (requested_pages > nr_free) return NULL;
@@ -95,25 +95,28 @@ static struct Page* buddy_system_alloc_pages(size_t requested_pages) {
     for (unsigned int current_order = order; current_order <= max_order; current_order++) {
         if (!list_empty(&buddy_array[current_order])) {
             while (current_order > order) {
-                buddy_system_split(current_order--);
+                buddy_system_split(current_order--);//如果高阶空闲块大于请求阶，需要分裂。
             }
-            allocated_page = le2page(list_next(&buddy_array[order]), page_link);
+            allocated_page = le2page(list_next(&buddy_array[order]), page_link);//取出链表中第一个块的页头。
             list_del(&allocated_page->page_link);
-            ClearPageProperty(allocated_page);
+            ClearPageProperty(allocated_page);//清除块头页的标志，表示它不再是空闲块。
             nr_free -= adjusted_pages;
             break;
         }
     }
 
-    return allocated_page;
+    return allocated_page;//返回分配到的 首页指针，供调用者使用。
 }
 
+//根据某个内存块的起始地址 block_addr 和块的阶数 order，计算并返回该块的“伙伴块”（buddy block）的地址。
+//一个块从偏移量 0bXXXX000 开始；
+//它的 buddy 块就是 0bXXXX000 的第 order 位取反后的结果。
 struct Page *get_buddy(struct Page *block_addr, unsigned int order) {
     size_t block_size = 1UL << order;
-    /* 计算 block_addr 相对于 buddy_system.base 的页偏移（以 Page 单位） */
+    // 计算 block_addr 相对于 buddy_system.base 的页偏移（以 Page 单位）
     size_t offset = (size_t)(block_addr - buddy_system.base);
     size_t buddy_offset = offset ^ block_size;
-    /* 边界检查，防止越界访问 */
+    // 边界检查，防止越界访问
     if (buddy_offset >= npage) {
         panic("get_buddy: buddy offset out of range\n");
     }
@@ -121,7 +124,7 @@ struct Page *get_buddy(struct Page *block_addr, unsigned int order) {
 }
 
 
-//页的释放
+//页的释放：释放的内存块与它的伙伴块都空闲时，就自动合并成更大的块，以避免内存碎片。
 static void buddy_system_free_pages(struct Page* base, size_t n) {
     assert(n > 0);
     size_t block_size = 1UL << base->property;
@@ -140,7 +143,7 @@ static void buddy_system_free_pages(struct Page* base, size_t n) {
             struct Page* tmp = block;
             block = buddy;
             buddy = tmp;
-        }
+        }//合并时，总是让 block 指向 地址较小 的那一块；
 
         list_del(&block->page_link);
         list_del(&buddy->page_link);
@@ -158,7 +161,6 @@ static void show_buddy_array(int left, int right) {
     assert(left >= 0 && left <= max_order && right >= 0 && right <= max_order);
     bool empty = 1;
     cprintf("----- 当前空闲链表数组 -----\n");
-
     for (int i = left; i <= right; i++) {
         list_entry_t* head = &buddy_array[i];
         list_entry_t* cur = list_next(head);
@@ -171,7 +173,6 @@ static void show_buddy_array(int left, int right) {
                 cprintf("  %lu 页, 地址 %p\n", 1UL << p->property, p);
                 cur = list_next(cur);
             } while (cur != head);
-            cprintf("\n");
         }
     }
     if (empty) cprintf("无空闲块\n");
@@ -228,6 +229,8 @@ static void buddy_system_check_simple(void) {
     cprintf("释放 p2, 总空闲页数: %d\n", nr_free);
     show_buddy_array(0, MAX_BUDDY_ORDER);
 }
+
+
 
 static void buddy_system_check_complex(void) {
     cprintf("=== CHECK COMPLEX ALLOC CONDITION ===\n");
@@ -362,3 +365,4 @@ const struct pmm_manager buddy_system_pmm_manager = {
     .nr_free_pages = buddy_system_nr_free_pages,
     .check = buddy_system_check,
 };
+
