@@ -59,6 +59,14 @@ typedef struct {
     unsigned int nr_free;           // number of free pages in this free list
 } free_area_t;
 
+#define MAX_BUDDY_ORDER 14 // 0x7cb9 31929
+typedef struct {
+    list_entry_t free_array[MAX_BUDDY_ORDER + 1];
+    unsigned int max_order;
+    size_t nr_free;
+    struct Page *base;
+} buddy_system_t;
+
 #endif /* !__ASSEMBLER__ */
 
 #endif /* !__KERN_MM_MEMLAYOUT_H__ */
