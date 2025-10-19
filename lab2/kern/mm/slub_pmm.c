@@ -4,7 +4,7 @@
 #include <slub_pmm.h>
 #include <stdio.h>
 
-// ----------- 第一层：单链表 free_area 管理 -----------
+// ----------- 第一层 -----------
 static free_area_t free_area;
 
 #define free_list (free_area.free_list)
@@ -431,6 +431,7 @@ const struct pmm_manager slub_pmm_manager = {
     .nr_free_pages = slub_nr_free_pages,
     .check = slub_check,
 };
+
 
 
 
