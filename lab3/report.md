@@ -162,6 +162,7 @@ struct trapframe {
 
 ### 题目：
 一、在trapentry.S中汇编代码 csrw sscratch, sp；csrrw s0, sscratch, x0实现了什么操作，目的是什么？
+
 二、save all里面保存了stval scause这些csr，而在restore all里面却不还原它们？那这样store的意义何在呢？
 
 ### 回答:
