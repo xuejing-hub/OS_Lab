@@ -35,6 +35,9 @@ int kern_init(void) {
     clock_init();   // init clock interrupt
     intr_enable();  // enable irq interrupt
 
+    asm volatile(".word 0xFFFFFFFF"); 
+    asm volatile("ebreak");    
+
     /* do nothing */
     while (1)
         ;
@@ -54,4 +57,5 @@ void __attribute__((noinline)) grade_backtrace0(int arg0, int arg1, int arg2) {
 }
 
 void grade_backtrace(void) { grade_backtrace0(0, (uintptr_t)kern_init, 0xffff0000); }
+
 
