@@ -1,3 +1,67 @@
+## 练习1：完善中断处理 （需要编程）
+
+简要说明实现过程和定时器中断中断处理的流程。
+
+### 实现代码
+
+```c
+clock_set_next_event();
+ticks++;
+if (ticks % TICK_NUM == 0) {
+    print_ticks();
+    num++;
+}
+if (num == 10) {
+    sbi_shutdown();
+}
+```
+
+### 实现过程
+
+1. **设置下一次时钟中断 — `clock_set_next_event()`**
+
+   重新设定下次时钟中断触发时间（当前时间 + 固定周期），为当前时间加上100000
+
+   > 若不重新设置，只会触发一次中断。
+
+2. **更新全局 ticks 计数 — `ticks++`**
+
+   `ticks` 是全局计数器，记录时钟中断触发的次数，每触发一次 timer interrupt 则加 1。
+
+3. **每 100 次 ticks 打印一次 — `ticks % TICK_NUM == 0`**
+
+   每 100 次时钟中断，调用一次 `print_ticks()` 打印 tick 信息，`num++` 记录打印次数。
+
+4. **达到 10 次 Tick 输出后关机 — `sbi_shutdown()`**
+
+   当打印 tick 次数达到 10 次后调用 `sbi_shutdown()` 关机，`sbi_shutdown()` 是 RISC-V 的 SBI 调用。
+
+
+### 定时器中断处理流程
+
+1. **初始化中断向量表**
+
+   `idt_init()` 函数设置 `stvec` 寄存器为内核统一中断入口 `__alltraps`，捕获所有异常与中断。
+
+2. **进入中断入口**
+
+   当定时器触发 S 态中断时，CPU 跳转到 `__alltraps`，`SAVE_ALL` 宏将通用寄存器、`sepc`、`sstatus` 等上下文信息压入内核栈形成`trapframe`，然后执行 `mov a0, sp` 将 `trapframe` 起始地址传入a0，进入 `trap()` 函数。
+
+3. **区分中断与异常**
+
+   `trap()` 函数调用 `trap_dispatch()`，根据 `cause` 寄存器判断事件类型为定时器中断，跳转到 `interrupt_handler()`。
+
+4. **处理 S 态定时器中断 IRQ_S_TIMER**
+
+   在 `interrupt_handler()` 命中 `IRQ_S_TIMER` 分支，执行时钟处理逻辑。
+
+5. **恢复现场并返回执行**
+
+   中断处理结束后返回 `trapentry.S`， 执行 `RESTORE_ALL` 恢复寄存器和 CSR，执行 `sret`指令返回中断前指令继续运行。
+
+---
+
+
 ## 扩展练习 Challenge1：描述与理解中断流程
 
 ### 题目：
