@@ -272,4 +272,98 @@ struct trapframe {
 
 - 恢复它们没有必要，也不会改变软件行为：  
   - 内核只关心恢复寄存器现场（通用寄存器和必要的控制状态寄存器，如 sstatus、sepc）  
-  - `stval` 和 `scause` 的作用在 C 层处理完成后就结束，后续中断或异常发生时会被硬件自动覆盖。  
+  - `stval` 和 `scause` 的作用在 C 层处理完成后就结束，后续中断或异常发生时会被硬件自动覆盖。
+
+
+## 扩展练习Challenge3：完善异常中断
+
+### 实验目的
+
+本实验旨在完善操作系统的异常处理机制，特别是对非法指令异常（Illegal Instruction）和断点异常（Breakpoint）的处理。通过捕获这两种异常并输出相关信息，加深对RISC-V架构异常处理机制的理解。
+
+### 实验内容
+
+编程完善在触发一条非法指令异常和断点异常，在 kern/trap/trap.c的异常处理函数中捕获，并对其进行处理，简单输出异常类型和异常指令触发地址，即“Illegal instruction caught at 0x(地址)”，“ebreak caught at 0x（地址）”与“Exception type:Illegal instruction"，“Exception type: breakpoint”。
+
+### 实现代码
+
+在`trap.c`的`exception_handler`函数中，我们添加了对两种异常的处理：
+
+#### 1. 非法指令异常处理（CAUSE_ILLEGAL_INSTRUCTION）
+
+```c
+case CAUSE_ILLEGAL_INSTRUCTION:
+    // 非法指令异常处理
+    cprintf("Exception type: Illegal instruction\n");
+    cprintf("Illegal instruction caught at 0x%08x\n", tf->epc);
+    tf->epc += 4; 
+    break;
+```
+
+#### 2. 断点异常处理（CAUSE_BREAKPOINT）
+
+```c
+case CAUSE_BREAKPOINT:
+    // 断点异常处理
+    cprintf("Exception type: Breakpoint\n");
+    cprintf("Breakpoint caught at 0x%08x\n", tf->epc);
+    tf->epc += 2; // ebreak指令长度为2字节
+    break;
+```
+
+### 关键代码
+
+#### 异常类型识别
+- 通过`tf->cause`寄存器判断异常类型
+- `CAUSE_ILLEGAL_INSTRUCTION`对应非法指令异常
+- `CAUSE_BREAKPOINT`对应断点异常
+
+#### 异常信息输出
+- 使用`cprintf`输出指令异常类型和异常指令地址
+- `tf->epc`寄存器保存了异常发生时程序计数器的值，即异常指令的地址
+
+#### 更新`tf->epc`寄存器
+- 更新`tf->epc`寄存器，使其指向下一个地址，以便在异常处理结束后程序能够正常恢复运行。
+- 非法指令异常：`tf->epc += 4`（RISC-V标准指令长度为4字节）
+- 断点异常：`tf->epc += 2`（ebreak指令长度为2字节）
+
+### 断点异常问题解决
+
+在实验过程中，断点异常处理遇到了一个重要问题：最初错误地使用了`tf->epc += 4`来处理断点异常，导致程序进入死循环。
+
+
+#### 问题原因分析：
+1. **指令长度差异**：在RISC-V架构中，大多数标准指令的长度为4字节，但这里实现的`ebreak`（断点）指令可能是一个特殊的压缩指令，其长度只有2字节。
+2. **程序计数器更新错误**：如果使用`tf->epc += 4`，程序计数器会跳过4个字节，这实际上跳过了`ebreak`指令后的正常指令，导致程序执行流混乱。
+3. **死循环机制**：错误的PC更新使得异常处理返回后，程序可能再次执行到异常触发点，或者跳转到无效的指令位置，形成无限循环。
+4. **指令对齐问题**：RISC-V要求指令必须按2字节或4字节对齐，错误的PC更新可能导致程序计数器指向不对齐的地址，引发新的异常。
+
+#### 解决方案：
+将断点异常的PC更新改为`tf->epc += 2`，这样：
+- 精确跳过2字节的`ebreak`指令
+- 程序能够正确继续执行后续指令
+- 避免了死循环问题
+- 确保程序计数器保持正确的对齐
+
+修改代码之后经过测试，证明我们的修改没有问题，代码成功运行，输出了预期的结果。
+
+
+### 实验结果
+在`kern_init`函数中添加两条特殊指令来触发异常
+```c
+asm volatile(".word 0xFFFFFFFF"); // 触发非法指令异常
+asm volatile("ebreak");           // 触发断点异常
+```
+
+当内核执行到`kern_init`函数中的异常触发指令时，会输出以下信息：
+
+```
+Exception type: Illegal instruction
+Illegal instruction caught at 0xc020009c
+Exception type: Breakpoint
+Breakpoint caught at 0xc02000a0
+```
+
+这表明系统成功捕获并处理了两种异常：
+1. 在地址`0xc020009c`处捕获到非法指令异常
+2. 在地址`0xc02000a0`处捕获到断点异常
