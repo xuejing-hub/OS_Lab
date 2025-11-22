@@ -101,6 +101,183 @@ struct context
 3. **系统调用**：用户态与内核态切换时，通过陷阱帧传递参数和保存状态
 4. **信号处理**：在进程接收到信号时，通过修改陷阱帧来改变执行流程
 
+
+## 练习二：为新创建的内核线程分配资源
+
+### 实现过程
+
+在 `do_fork` 函数中，我按照实验要求完成了内核线程的创建过程，具体实现如下：
+
+```c
+int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
+    int ret = -E_NO_FREE_PROC;
+    struct proc_struct *proc;
+    if (nr_process >= MAX_PROCESS) 
+    {
+        goto fork_out;
+    }
+    ret = -E_NO_MEM;
+    
+    // 调用 alloc_proc 分配一个新的进程控制块
+    proc = alloc_proc();
+    // 检查是否成功分配
+    if (proc == NULL) {
+        // 若分配失败，跳转到fork_out进行错误处理
+        goto fork_out;
+    }
+    
+    // 设置父进程指针并分配进程ID
+    proc->parent = current;
+    proc->pid = get_pid();
+    
+    // 为进程分配内核栈
+    if (setup_kstack(proc) != 0) {
+        // 若内核栈分配失败，跳转到bad_fork_cleanup_kstack进行错误处理
+        goto bad_fork_cleanup_proc;
+    }
+    
+    // 复制或共享内存管理信息
+    if (copy_mm(clone_flags, proc) != 0) {
+        // 若内存管理信息复制或共享失败，跳转到bad_fork_cleanup_proc进行错误处理
+        goto bad_fork_cleanup_kstack;
+    }
+    
+    // 设置新进程的中断帧和上下文
+    copy_thread(proc, stack, tf);
+    
+    // 将新进程添加到进程列表和哈希表
+    hash_proc(proc);
+    list_add(&proc_list, &(proc->list_link));
+    // 增加进程计数器
+    nr_process++;
+    
+    // 唤醒新进程
+    wakeup_proc(proc);
+    // 设置返回值为新进程的PID
+    ret = proc->pid;
+
+// 错误处理出口
+fork_out:
+    // 返回新进程的PID或错误代码
+    return ret;
+
+// 内核栈分配失败的错误处理
+bad_fork_cleanup_kstack:
+    // 释放内核栈
+    put_kstack(proc);
+// 进程结构体分配失败的错误处理
+bad_fork_cleanup_proc:
+    // 释放进程结构体
+    kfree(proc);
+    // 跳转到错误处理出口
+    goto fork_out;
+}
+```
+
+#### 执行流程
+
+  `do_fork` 函数的执行流程：首先调用 `alloc_proc()` 分配一个新的 `proc_struct` 结构体来表示新进程，如果分配成功，设置新进程的父进程指针为当前进程，通过 `get_pid()` 为新进程分配一个唯一的进程ID，接着调用 `setup_kstack()` 为新进程分配独立的内核栈空间，并调用 `copy_mm()` 根据 `clone_flags` 参数复制或共享内存管理信息（对于内核线程而言实际上是共享内核地址空间）。使用 `copy_thread()` 设置新进程的中断帧和上下文信息，确保新进程能够正确启动和运行，并将新进程的 `proc_struct` 结构体分别插入到哈希列表（便于快速查找）和进程链表（便于遍历管理）中，同时增加系统进程计数器，最后调用 `wakeup_proc()` 将新进程的状态设置为 `PROC_RUNNABLE`，表示进程已准备好运行并可以被调度器选中，并将新进程的PID设置为函数的返回值，完成整个内核线程的创建过程。
+
+
+### 问题
+
+#### ucore是否做到给每个新fork的线程一个唯一的id？
+
+**答案：ucore能够确保给每个新fork的线程分配唯一的PID。**
+
+分析 `get_pid()` 函数的实现机制，可以确认PID分配的唯一性：
+
+1. **初始化变量**
+   ```c
+   static int next_safe = MAX_PID, last_pid = MAX_PID;
+   ```
+   使用静态变量 `last_pid` 记录上次分配的PID，`next_safe` 记录下一个已被占用的PID边界，防止重复分配。
+
+2. **PID递增分配**
+   ```c
+   if (++last_pid >= MAX_PID) {
+       last_pid = 1;
+       goto inside;
+   }
+   ```
+    每次调用 `get_pid()` 时，先将 `last_pid` 递增，如果递增后超过 `MAX_PID`，则将其重置为1，进入 inside 标签，重置 next_safe 为 MAX_PID，然后进入 repeat 标签。
+
+
+3. **安全边界**
+   ```c
+   if (last_pid >= next_safe) {
+   inside:
+       next_safe = MAX_PID;
+   repeat:
+   ```
+   当 `last_pid` 达到或超过 `next_safe` 时，说明可能进入已占用的PID区域，需要重新扫描进程列表，此时重置 `next_safe` 为 `MAX_PID`，进入冲突检测。
+
+4. **冲突检测**
+   ```c
+   le = list;
+   while ((le = list_next(le)) != list) {
+       proc = le2proc(le, list_link);
+       if (proc->pid == last_pid) {
+           if (++last_pid >= next_safe) {
+               if (last_pid >= MAX_PID) {
+                   last_pid = 1;
+               }
+               next_safe = MAX_PID;
+               goto repeat;
+           }
+       }
+       else if (proc->pid > last_pid && next_safe > proc->pid) {
+           next_safe = proc->pid;
+       }
+   }
+   ```
+   遍历整个进程链表，检查每个活跃进程的PID。如果发现当前 `last_pid` 已被占用，立即递增并重新检查；如果递增后超出安全边界，则重新开始扫描。同时，函数还会更新 `next_safe` 为遇到的下一个最小的已占用PID，这样下次分配时就能快速跳过安全区域，提高分配效率。
+
+`get_pid()` 函数：
+```c
+static int
+get_pid(void)
+{
+    static_assert(MAX_PID > MAX_PROCESS);
+    struct proc_struct *proc;
+    list_entry_t *list = &proc_list, *le;
+    static int next_safe = MAX_PID, last_pid = MAX_PID;
+    if (++last_pid >= MAX_PID)
+    {
+        last_pid = 1;
+        goto inside;
+    }
+    if (last_pid >= next_safe)
+    {
+    inside:
+        next_safe = MAX_PID;
+    repeat:
+        le = list;
+        while ((le = list_next(le)) != list)
+        {
+            proc = le2proc(le, list_link);
+            if (proc->pid == last_pid)
+            {
+                if (++last_pid >= next_safe)
+                {
+                    if (last_pid >= MAX_PID)
+                    {
+                        last_pid = 1;
+                    }
+                    next_safe = MAX_PID;
+                    goto repeat;
+                }
+            }
+            else if (proc->pid > last_pid && next_safe > proc->pid)
+            {
+                next_safe = proc->pid;
+            }
+        }
+    }
+    return last_pid;
+}
+````
+
 ---
 ## 练习3：编写proc_run 函数（需要编码）
 
@@ -361,4 +538,5 @@ if (!(*pdep0 & PTE_V)) {
 
 
 ---
+
 
