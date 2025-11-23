@@ -209,7 +209,6 @@ void proc_run(struct proc_struct *proc)
 
         // clear need_resched for the new current and increase run count
         proc->need_resched = 0;
-        proc->runs++;
 
         // switch the page table (satp) to the new process's pgdir
         // proc->pgdir holds the physical page directory/base for the process
